@@ -1,46 +1,52 @@
 import sys
 import os
-import json 
-import zipfile 
-import tempfile 
-import shutil 
-import hashlib 
+import json
+import zipfile
+import tempfile
+import shutil
+import hashlib
 from datetime import datetime
-import time 
-import socket 
+import time
+import socket
 
 # PyQt5 模块导入
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QFileDialog,
                              QMessageBox, QTabWidget, QTextEdit, QComboBox,
-                             QLineEdit, QGroupBox, QListWidget, 
-                             QProgressBar, QInputDialog, QListWidgetItem)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, pyqtSlot 
+                             QLineEdit, QGroupBox, QListWidget,
+                             QProgressBar, QInputDialog, QListWidgetItem, QRadioButton) # 导入 QRadioButton
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, pyqtSlot
 
 # 导入自定义模块
-from aes_encryption import AES 
-from des_encryption import DES 
-from rsa_encryption import RSA 
-from network_core import P2PConnectionThread, UDPDiscoveryThread, TCPListenerThread, get_suggested_local_ip, UDP_DISCOVERY_PORT, BROADCAST_INTERVAL_S, PEER_TIMEOUT_S, MSG_TYPE_KEY_EXCHANGE, MSG_TYPE_FILE_TRANSFER 
-from identity_manager import IdentityManager 
+from aes_encryption import AES
+from des_encryption import DES
+from rsa_encryption import RSA
+from network_core import P2PConnectionThread, UDPDiscoveryThread, TCPListenerThread, get_suggested_local_ip, UDP_DISCOVERY_PORT, BROADCAST_INTERVAL_S, PEER_TIMEOUT_S, MSG_TYPE_KEY_EXCHANGE, MSG_TYPE_FILE_TRANSFER
+from identity_manager import IdentityManager
+
+# 操作模式常量
+LOCAL_MODE = "本地模拟模式"
+P2P_MODE = "P2P远程传输模式"
 
 class FileEncryptionApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.rsa = RSA() 
-        self.is_listening = False 
+        self.rsa = RSA() # RSA 实例，用于本机操作
+        self.is_listening = False
 
         self.my_uuid = None
         self.my_nickname = None
-        self._my_public_key_pem = None 
+        self._my_public_key_pem = None
 
-        self.identity_manager = IdentityManager(self, self.rsa) 
-        
+        self.identity_manager = IdentityManager(self, self.rsa)
+
         self.udp_discovery_thread = None
-        self.tcp_listener_thread = None 
-        self.discovered_peers = {} 
-        self.peer_cleanup_timer = QTimer(self) 
+        self.tcp_listener_thread = None
+        self.discovered_peers = {}
+        self.peer_cleanup_timer = QTimer(self)
         self.active_p2p_sessions = {} # 存储活跃的 P2PConnectionThread 实例
+
+        self.operation_mode = LOCAL_MODE # 默认设置为本地模拟模式
 
         self.initUI()
 
@@ -62,22 +68,24 @@ class FileEncryptionApp(QMainWindow):
         print("DEBUG: _post_init_setup: 身份和密钥加载完成，UI已更新。")
 
         self.start_tcp_listener()
-        self.start_udp_discovery() 
-        
+        self.start_udp_discovery()
+
         self.peer_cleanup_timer.timeout.connect(self._check_peer_timeouts)
-        self.peer_cleanup_timer.start(int(PEER_TIMEOUT_S * 1000 / 2)) 
+        self.peer_cleanup_timer.start(int(PEER_TIMEOUT_S * 1000 / 2))
+
+        self._update_manual_tabs_ui() # 新增：初始化手动模式选择器
 
     def get_my_public_key_fingerprint(self):
         """
         获取本机身份公钥的 SHA256 指纹（十六进制字符串）。
         此方法现在委托给 IdentityManager。
         """
-        if self.identity_manager: 
+        if self.identity_manager:
             return self.identity_manager.get_my_public_key_fingerprint()
-        return "初始化中..." 
+        return "初始化中..."
 
     def initUI(self):
-        self.setWindowTitle('安全文件传输工具 - P2P') 
+        self.setWindowTitle('安全文件传输工具 - P2P')
         self.setGeometry(100, 100, 1100, 800)
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -85,46 +93,59 @@ class FileEncryptionApp(QMainWindow):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
 
-        connection_group = QGroupBox("网络连接") 
+        connection_group = QGroupBox("网络连接")
         connection_layout = QVBoxLayout()
-        
-        self.my_identity_label = QLabel(f"<b>本机身份:</b> {self.my_nickname if self.my_nickname else '加载中...'} ({self.my_uuid[:8]}...)" if self.my_uuid else "加载中...") 
-        self.my_fingerprint_label = QLabel(f"<b>公钥指纹:</b> {self.get_my_public_key_fingerprint()[:16]}...") 
+
+        self.my_identity_label = QLabel(f"<b>本机身份:</b> {self.my_nickname if self.my_nickname else '加载中...'} ({self.my_uuid[:8]}...)" if self.my_uuid else "加载中...")
+        self.my_fingerprint_label = QLabel(f"<b>公钥指纹:</b> {self.get_my_public_key_fingerprint()[:16]}...")
         connection_layout.addWidget(self.my_identity_label)
         connection_layout.addWidget(self.my_fingerprint_label)
 
         ip_layout = QHBoxLayout()
-        ip_layout.addWidget(QLabel("本机IP (建议):")) 
+        ip_layout.addWidget(QLabel("本机IP (建议):"))
         self.ip_input = QLineEdit()
-        self.ip_input.setText(get_suggested_local_ip()) 
-        self.ip_input.setPlaceholderText("本机监听IP (推荐 0.0.0.0 监听所有网卡)") 
+        self.ip_input.setText(get_suggested_local_ip())
+        self.ip_input.setPlaceholderText("本机监听IP (推荐 0.0.0.0 监听所有网卡)")
         ip_layout.addWidget(self.ip_input)
         connection_layout.addLayout(ip_layout)
-        
+
         port_layout = QHBoxLayout()
-        port_layout.addWidget(QLabel("TCP端口 (监听):")) 
+        port_layout.addWidget(QLabel("TCP端口 (监听):"))
         self.port_input = QLineEdit()
-        self.port_input.setText("50000") 
+        self.port_input.setText("50000")
         self.port_input.setPlaceholderText("建议 50000，所有 P2P 节点需一致")
         port_layout.addWidget(self.port_input)
         connection_layout.addLayout(port_layout)
-        
+
         self.conn_tip_label = QLabel(
             '<b style="color:#1976d2">本程序将自动发现局域网内其他节点。您也可以手动指定IP和端口进行连接。</b>'
         )
         self.conn_tip_label.setWordWrap(True)
         connection_layout.addWidget(self.conn_tip_label)
-        
-        self.connection_status = QLabel("P2P 发现中...") 
+
+        self.connection_status = QLabel("P2P 发现中...")
         connection_layout.addWidget(self.connection_status)
-        
+
         connection_group.setLayout(connection_layout)
         layout.addWidget(connection_group)
 
+        # --- NEW --- 操作模式选择
+        mode_group = QGroupBox("操作模式选择")
+        mode_layout = QHBoxLayout()
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems([LOCAL_MODE, P2P_MODE])
+        self.mode_combo.setCurrentText(self.operation_mode) # 设置默认选中项
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        mode_layout.addWidget(QLabel("当前模式:"))
+        mode_layout.addWidget(self.mode_combo)
+        mode_group.setLayout(mode_layout)
+        layout.addWidget(mode_group)
+        # --- END NEW ---
+
         self.peers_group = QGroupBox("发现的邻居")
         self.peers_layout = QVBoxLayout()
-        self.peers_list_widget = QListWidget() 
-        self.peers_list_widget.itemDoubleClicked.connect(self._initiate_p2p_connection) 
+        self.peers_list_widget = QListWidget()
+        self.peers_list_widget.itemDoubleClicked.connect(self._initiate_p2p_connection)
         self.peers_list_widget.currentItemChanged.connect(self._update_send_button_status)
         self.peers_layout.addWidget(self.peers_list_widget)
         self.peers_group.setLayout(self.peers_layout)
@@ -149,19 +170,19 @@ class FileEncryptionApp(QMainWindow):
         )
         quick_action_tip.setWordWrap(True)
         quick_action_tip.setStyleSheet("""
-            background-color: #f0f8ff; 
-            padding: 15px; 
+            background-color: #f0f8ff;
+            padding: 15px;
             border-radius: 8px;
             border: 1px solid #b3e0ff;
             margin-bottom: 10px;
         """)
         quick_action_layout.addWidget(quick_action_tip)
-        
+
         # 发送方操作
         sender_group = QGroupBox("发送方操作")
         sender_layout = QVBoxLayout()
         sender_layout.setSpacing(15)
-        
+
         # 文件选择部分
         file_select_layout = QHBoxLayout()
         self.select_file_btn = QPushButton("选择要发送的文件")
@@ -174,7 +195,7 @@ class FileEncryptionApp(QMainWindow):
         file_select_layout.addWidget(self.select_file_btn)
         file_select_layout.addWidget(self.selected_file_label, 1)
         sender_layout.addLayout(file_select_layout)
-        
+
         # 发送按钮
         self.send_btn = QPushButton("一键发送")
         self.send_btn.setIcon(self.style().standardIcon(self.style().SP_ArrowRight))
@@ -198,26 +219,26 @@ class FileEncryptionApp(QMainWindow):
         self.send_btn.clicked.connect(self.quick_send)
         self.send_btn.setEnabled(False)
         sender_layout.addWidget(self.send_btn, alignment=Qt.AlignCenter)
-        
+
         sender_group.setLayout(sender_layout)
         quick_action_layout.addWidget(sender_group)
-        
+
         # 接收方操作
         receiver_group = QGroupBox("接收方操作")
         receiver_layout = QVBoxLayout()
         receiver_layout.setSpacing(15)
-        
+
         # 接收状态显示
         self.receive_status_label = QLabel("等待接收文件...")
         self.receive_status_label.setStyleSheet("""
-            color: #666; 
+            color: #666;
             padding: 10px;
             background-color: #f5f5f5;
             border-radius: 5px;
             border: 1px solid #ddd;
         """)
         receiver_layout.addWidget(self.receive_status_label)
-        
+
         # 接收按钮
         self.receive_btn = QPushButton("一键接收 (等待数据)")
         self.receive_btn.setIcon(self.style().standardIcon(self.style().SP_ArrowDown))
@@ -237,10 +258,10 @@ class FileEncryptionApp(QMainWindow):
         """)
         self.receive_btn.clicked.connect(self.quick_receive_setup)
         receiver_layout.addWidget(self.receive_btn, alignment=Qt.AlignCenter)
-        
+
         receiver_group.setLayout(receiver_layout)
         quick_action_layout.addWidget(receiver_group)
-        
+
         # 进度条
         progress_group = QGroupBox("传输进度")
         progress_layout = QVBoxLayout()
@@ -262,11 +283,11 @@ class FileEncryptionApp(QMainWindow):
         progress_layout.addWidget(self.progress_bar)
         progress_group.setLayout(progress_layout)
         quick_action_layout.addWidget(progress_group)
-        
+
         # 添加状态提示
         self.status_tip_label = QLabel("")
         self.status_tip_label.setStyleSheet("""
-            color: #666; 
+            color: #666;
             font-style: italic;
             padding: 10px;
             background-color: #fffde7;
@@ -275,7 +296,7 @@ class FileEncryptionApp(QMainWindow):
         """)
         self.status_tip_label.setWordWrap(True)
         quick_action_layout.addWidget(self.status_tip_label)
-        
+
         quick_action_layout.addStretch()
         quick_action_tab.setLayout(quick_action_layout)
 
@@ -336,6 +357,18 @@ class FileEncryptionApp(QMainWindow):
         key_enc_file_layout.addWidget(key_enc_file_btn)
         key_enc_file_group.setLayout(key_enc_file_layout)
         key_enc_layout.addWidget(key_enc_file_group)
+
+        # --- NEW --- 密钥加密目标选择
+        self.key_enc_target_peer_group = QGroupBox("选择目标接收方 (RSA公钥加密)")
+        self.key_enc_target_peer_layout = QHBoxLayout()
+        self.key_enc_target_peer_combo = QComboBox()
+        self.key_enc_target_peer_combo.setPlaceholderText("选择 P2P 邻居或使用本机公钥")
+        self.key_enc_target_peer_layout.addWidget(QLabel("加密对象:"))
+        self.key_enc_target_peer_layout.addWidget(self.key_enc_target_peer_combo)
+        self.key_enc_target_peer_group.setLayout(self.key_enc_target_peer_layout)
+        key_enc_layout.addWidget(self.key_enc_target_peer_group)
+        # --- END NEW ---
+
         key_enc_btn = QPushButton('RSA加密密钥')
         key_enc_btn.setFixedWidth(180)
         key_enc_btn.clicked.connect(self.key_encrypt)
@@ -399,6 +432,18 @@ class FileEncryptionApp(QMainWindow):
         auth_file_layout.addWidget(auth_sig_btn)
         auth_file_group.setLayout(auth_file_layout)
         auth_layout.addWidget(auth_file_group)
+
+        # --- NEW --- 认证签名者选择
+        self.auth_signer_group = QGroupBox("选择签名者 (RSA公钥验证)")
+        self.auth_signer_layout = QHBoxLayout()
+        self.auth_signer_combo = QComboBox()
+        self.auth_signer_combo.setPlaceholderText("选择 P2P 邻居或使用本机公钥")
+        self.auth_signer_layout.addWidget(QLabel("签名者:"))
+        self.auth_signer_layout.addWidget(self.auth_signer_combo)
+        self.auth_signer_group.setLayout(self.auth_signer_layout)
+        auth_layout.addWidget(self.auth_signer_group)
+        # --- END NEW ---
+
         auth_btn = QPushButton('认证')
         auth_btn.setFixedWidth(150)
         auth_btn.clicked.connect(self.auth_verify)
@@ -495,7 +540,7 @@ class FileEncryptionApp(QMainWindow):
         generate_key_btn.clicked.connect(self.generate_new_keypair)
         generate_key_layout.addWidget(generate_key_btn)
         generate_key_group.setLayout(generate_key_layout)
-        key_manage_layout.addWidget(generate_key_group) 
+        key_manage_layout.addWidget(generate_key_group)
         # 导出公钥
         export_pub_group = QGroupBox("导出公钥")
         export_pub_layout = QHBoxLayout()
@@ -504,7 +549,7 @@ class FileEncryptionApp(QMainWindow):
         export_pub_btn.clicked.connect(self.export_public_key)
         export_pub_layout.addWidget(export_pub_btn)
         export_pub_group.setLayout(export_pub_layout)
-        key_manage_layout.addWidget(export_pub_group) 
+        key_manage_layout.addWidget(export_pub_group)
         # 新增：导入信任公钥
         import_trusted_pub_group = QGroupBox("导入信任公钥")
         import_trusted_pub_layout = QHBoxLayout()
@@ -522,7 +567,7 @@ class FileEncryptionApp(QMainWindow):
         export_priv_btn.clicked.connect(self.export_private_key)
         export_priv_layout.addWidget(export_priv_btn)
         export_priv_group.setLayout(export_priv_layout)
-        key_manage_layout.addWidget(export_priv_group) 
+        key_manage_layout.addWidget(export_priv_group)
         # 导入公钥
         import_pub_group = QGroupBox("导入公钥")
         import_pub_layout = QHBoxLayout()
@@ -531,7 +576,7 @@ class FileEncryptionApp(QMainWindow):
         import_pub_btn.clicked.connect(self.import_public_key)
         import_pub_layout.addWidget(import_pub_btn)
         import_pub_group.setLayout(import_pub_layout)
-        key_manage_layout.addWidget(import_pub_group) 
+        key_manage_layout.addWidget(import_pub_group)
         # 导入私钥
         import_priv_group = QGroupBox("导入私钥")
         import_priv_layout = QHBoxLayout()
@@ -540,21 +585,21 @@ class FileEncryptionApp(QMainWindow):
         import_priv_btn.clicked.connect(self.import_private_key)
         import_priv_layout.addWidget(import_priv_btn)
         import_priv_group.setLayout(import_priv_layout)
-        key_manage_layout.addWidget(import_priv_group) 
+        key_manage_layout.addWidget(import_priv_group)
         key_manage_layout.addStretch(1)
-        key_manage_tab.setLayout(key_manage_layout) 
+        key_manage_tab.setLayout(key_manage_layout)
 
         # 更新功能介绍页面
         tutorial_tab = QWidget()
         tutorial_layout = QVBoxLayout(tutorial_tab)
         tutorial_layout.setSpacing(20)
         tutorial_layout.setContentsMargins(40, 30, 40, 30)
-        
+
         tutorial_text = QTextEdit()
         tutorial_text.setReadOnly(True)
         tutorial_text.setHtml('''
         <h2 style="color: #1976d2;">安全文件传输工具使用手册</h2>
-        
+
         <h3 style="color: #2196F3;">1. P2P网络发现与连接</h3>
         <div style="background-color: #f5f5f5; padding: 15px; border-radius: 8px; margin: 10px 0;">
             <h4>基本概念</h4>
@@ -563,7 +608,7 @@ class FileEncryptionApp(QMainWindow):
                 <li>每个节点既是发送方也是接收方，无需手动选择角色</li>
                 <li>首次连接时会进行身份验证，确保通信安全</li>
             </ul>
-            
+
             <h4>网络配置</h4>
             <ul>
                 <li><b>本机IP (建议)</b>：程序自动检测本地IP。如无法连接，请：
@@ -586,14 +631,14 @@ class FileEncryptionApp(QMainWindow):
                 <li>点击"一键发送"按钮</li>
                 <li>等待传输完成提示</li>
             </ol>
-            
+
             <h4>接收文件</h4>
             <ol>
                 <li>程序自动接收文件，无需手动操作</li>
                 <li>收到文件时会弹出保存对话框</li>
                 <li>选择保存位置后自动解密并保存</li>
             </ol>
-            
+
             <p style="color: #d32f2f;"><b>注意：</b>首次与对方通信时，需要验证对方身份。请通过其他安全渠道（如电话、短信）核对公钥指纹。</p>
         </div>
 
@@ -604,19 +649,19 @@ class FileEncryptionApp(QMainWindow):
                 <li>支持AES和DES两种加密算法</li>
                 <li>生成加密文件和对应的密钥文件</li>
             </ul>
-            
+
             <h4>密钥加密</h4>
             <ul>
                 <li>使用RSA算法加密对称密钥</li>
                 <li>确保密钥传输安全</li>
             </ul>
-            
+
             <h4>文件签名与验证</h4>
             <ul>
                 <li>使用SHA256+RSA进行签名</li>
                 <li>验证文件完整性和发送方身份</li>
             </ul>
-            
+
             <h4>文件解密</h4>
             <ul>
                 <li>先解密RSA加密的密钥</li>
@@ -643,7 +688,7 @@ class FileEncryptionApp(QMainWindow):
                 <li><b>无法发现邻居：</b>检查防火墙设置，确保UDP广播未被阻止</li>
                 <li><b>连接超时：</b>确认对方在线且网络正常</li>
             </ul>
-            
+
             <h4>传输问题</h4>
             <ul>
                 <li><b>文件发送失败：</b>检查网络连接和接收方状态</li>
@@ -656,7 +701,7 @@ class FileEncryptionApp(QMainWindow):
         tutorial_tab.setLayout(tutorial_layout)
 
         # 添加标签页到 TabWidget
-        tabs.addTab(quick_action_tab, "一键操作") 
+        tabs.addTab(quick_action_tab, "一键操作")
         tabs.addTab(enc_tab, "文件加密")
         tabs.addTab(key_enc_tab, "密钥加密")
         tabs.addTab(sign_tab, "SHA+RSA签名")
@@ -667,6 +712,67 @@ class FileEncryptionApp(QMainWindow):
         tabs.addTab(tutorial_tab, "页面功能介绍")
         layout.addWidget(tabs)
         main_widget.setLayout(layout)
+
+    # --- NEW --- 模式切换槽函数
+    @pyqtSlot(int)
+    def _on_mode_changed(self, index):
+        selected_mode = self.mode_combo.currentText()
+        if self.operation_mode != selected_mode:
+            self.operation_mode = selected_mode
+            QMessageBox.information(self, "模式切换", f"已切换到 {self.operation_mode}。部分功能行为将随之调整。")
+            self._update_manual_tabs_ui() # 调用新方法更新手动操作标签页的UI
+            print(f"DEBUG: Operation mode switched to: {self.operation_mode}")
+
+    # --- NEW --- 更新手动操作标签页的UI
+    def _update_manual_tabs_ui(self):
+        """
+        更新手动操作标签页（密钥加密、认证）中的目标/签名者选择器。
+        """
+        self.key_enc_target_peer_combo.clear()
+        self.auth_signer_combo.clear()
+
+        if self.operation_mode == LOCAL_MODE:
+            self.key_enc_target_peer_combo.addItem("本机 (使用本机公钥)", {'uuid': self.my_uuid, 'nickname': self.my_nickname})
+            self.auth_signer_combo.addItem("本机 (使用本机公钥)", {'uuid': self.my_uuid, 'nickname': self.my_nickname})
+            self.key_enc_target_peer_combo.setEnabled(True) # 在本地模式下，本机选项始终可用
+            self.auth_signer_combo.setEnabled(True)
+        elif self.operation_mode == P2P_MODE:
+            # P2P模式下，列出所有已信任的邻居
+            trusted_peers_found = False
+            for peer_uuid, peer_data in self.identity_manager.trusted_peers.items():
+                display_text = f"{peer_data['nickname']} ({peer_uuid[:8]}...) (已信任)"
+                combo_data = {'uuid': peer_uuid, 'nickname': peer_data['nickname']}
+                self.key_enc_target_peer_combo.addItem(display_text, combo_data)
+                self.auth_signer_combo.addItem(display_text, combo_data)
+                trusted_peers_found = True
+
+            # 如果没有信任的邻居，禁用选择器并提示
+            if not trusted_peers_found:
+                self.key_enc_target_peer_combo.setPlaceholderText("无已信任邻居")
+                self.auth_signer_combo.setPlaceholderText("无已信任邻居")
+                self.key_enc_target_peer_combo.setEnabled(False)
+                self.auth_signer_combo.setEnabled(False)
+                QMessageBox.warning(self, "无信任邻居", "P2P模式下进行手动密钥加密和认证需要选择已信任的邻居。请先通过P2P连接建立信任。")
+            else:
+                self.key_enc_target_peer_combo.setEnabled(True)
+                self.auth_signer_combo.setEnabled(True)
+
+        # 确保一键操作按钮的可用性在P2P模式下才有效
+        self._update_send_button_status() # 这个方法可以复用，它已经检查了是否选中P2P邻居
+
+        # 禁用一键操作按钮在本地模式下
+        if self.operation_mode == LOCAL_MODE:
+            self.send_btn.setEnabled(False)
+            self.receive_btn.setEnabled(False) # 接收按钮虽然总是可用，但提示语需要调整
+            self.receive_status_label.setText("本地模式下无法接收P2P文件")
+            self.receive_status_label.setStyleSheet("color: #d32f2f;")
+        else: # P2P_MODE
+            self.receive_btn.setEnabled(True)
+            self.receive_status_label.setText("等待接收文件...")
+            self.receive_status_label.setStyleSheet("color: #666;") # 恢复默认样式
+            # send_btn 会在 _update_send_button_status 中根据选择的P2P邻居状态调整
+
+    # --- END NEW ---
 
     # --- NEW --- 启动 TCP 监听线程的方法
     def start_tcp_listener(self):
@@ -688,7 +794,7 @@ class FileEncryptionApp(QMainWindow):
     def _handle_incoming_connection(self, conn_socket, addr_info):
         peer_ip, peer_port = addr_info
         print(f"DEBUG: 收到来自 {peer_ip}:{peer_port} 的入站连接。")
-        
+
         p2p_session_thread = P2PConnectionThread(
             my_uuid=self.my_uuid,
             my_nickname=self.my_nickname,
@@ -705,97 +811,99 @@ class FileEncryptionApp(QMainWindow):
         p2p_session_thread.request_tofu_verification.connect(self._handle_tofu_request)
         p2p_session_thread.start()
         # 暂时用 socket.fileno() 作为键，待公钥交换完成后更新为真实的 peer_uuid
-        self.active_p2p_sessions[conn_socket.fileno()] = p2p_session_thread 
+        self.active_p2p_sessions[conn_socket.fileno()] = p2p_session_thread
 
     # --- NEW --- 从 UI 列表双击发起 P2P 连接
     @pyqtSlot(QListWidgetItem)
-    def _initiate_p2p_connection(self, item): 
+    def _initiate_p2p_connection(self, item):
         peer_uuid = item.data(Qt.UserRole)
         peer_data = self.discovered_peers.get(peer_uuid)
 
         if not peer_data:
-            QMessageBox.warning(self.parent(), "错误", "邻居信息无效或已离线。") 
-            self._update_peers_ui_list() 
+            QMessageBox.warning(self.parent(), "错误", "邻居信息无效或已离线。")
+            self._update_peers_ui_list()
             return
 
         # 检查是否已经存在与该邻居的活跃连接
-        for session_key, session_thread in list(self.active_p2p_sessions.items()): 
+        for session_key, session_thread in list(self.active_p2p_sessions.items()):
             if (session_thread.peer_uuid == peer_uuid and session_thread.is_connected) or \
                (session_thread.peer_uuid is None and session_thread.peer_ip == peer_data['ip'] and session_thread.peer_port == peer_data['tcp_port'] and session_thread.is_connected):
                 QMessageBox.information(self.parent(), "提示", f"已与 {peer_data['nickname']} 建立连接。")
                 return
 
         print(f"DEBUG: 尝试连接到 {peer_data['nickname']} ({peer_data['ip']}:{peer_data['tcp_port']})")
-        
+
         p2p_session_thread = P2PConnectionThread(
             my_uuid=self.my_uuid,
             my_nickname=self.my_nickname,
             my_pk_fingerprint=self.get_my_public_key_fingerprint(),
-            rsa_instance=self.rsa, 
-            identity_manager=self.identity_manager, 
-            peer_ip=peer_data['ip'], 
-            peer_port=peer_data['tcp_port'] 
+            rsa_instance=self.rsa,
+            identity_manager=self.identity_manager,
+            peer_ip=peer_data['ip'],
+            peer_port=peer_data['tcp_port']
         )
         p2p_session_thread.message_received.connect(self.handle_message)
         p2p_session_thread.key_exchange_completed.connect(self._handle_key_exchange_completed)
         p2p_session_thread.peer_disconnected.connect(self._handle_peer_disconnected)
         p2p_session_thread.request_tofu_verification.connect(self._handle_tofu_request)
         p2p_session_thread.start()
-        self.active_p2p_sessions[peer_uuid] = p2p_session_thread 
+        self.active_p2p_sessions[peer_uuid] = p2p_session_thread
         self._update_send_button_status()
 
     # --- NEW --- 处理公钥交换完成信号
-    @pyqtSlot(str, str) 
+    @pyqtSlot(str, str)
     def _handle_key_exchange_completed(self, peer_uuid, status_message):
         session_thread_to_update = None
         temp_key_to_remove = None
-        for key, thread_instance in list(self.active_p2p_sessions.items()): 
-            if thread_instance.peer_uuid == peer_uuid: 
+        for key, thread_instance in list(self.active_p2p_sessions.items()):
+            if thread_instance.peer_uuid == peer_uuid:
                 session_thread_to_update = thread_instance
-                if key != peer_uuid: 
+                if key != peer_uuid:
                     temp_key_to_remove = key
                 break
-        
+
         if session_thread_to_update:
-            if temp_key_to_remove is not None and temp_key_to_remove in self.active_p2p_sessions: 
+            if temp_key_to_remove is not None and temp_key_to_remove in self.active_p2p_sessions:
                 del self.active_p2p_sessions[temp_key_to_remove]
-                self.active_p2p_sessions[peer_uuid] = session_thread_to_update 
-            
+                self.active_p2p_sessions[peer_uuid] = session_thread_to_update
+
             print(f"DEBUG: 与 {session_thread_to_update.peer_nickname} ({peer_uuid[:8]}) 的公钥交换完成: {status_message}")
-            self._update_peers_ui_list() 
-            self._update_send_button_status() 
+            self._update_peers_ui_list()
+            self._update_send_button_status()
+            self._update_manual_tabs_ui() # 新增：更新手动模式选择器
         else:
             print(f"DEBUG: 公钥交换完成，但找不到会话线程: {peer_uuid}")
 
     # --- NEW --- 处理对端断开连接信号
-    @pyqtSlot(str) 
+    @pyqtSlot(str)
     def _handle_peer_disconnected(self, peer_identifier):
         print(f"DEBUG: 邻居 {peer_identifier[:8]} 已断开连接。")
-        
+
         key_to_remove = None
         if peer_identifier in self.active_p2p_sessions:
             key_to_remove = peer_identifier
-        else: 
+        else:
             for key, thread_instance in list(self.active_p2p_sessions.items()):
                  if hasattr(thread_instance, 'peer_ip') and f"unidentified_peer_{thread_instance.peer_ip}:{thread_instance.peer_port}" == peer_identifier:
                     key_to_remove = key
                     break
-        
+
         if key_to_remove and key_to_remove in self.active_p2p_sessions:
             session_thread = self.active_p2p_sessions[key_to_remove]
-            if session_thread and session_thread.isRunning(): 
-                session_thread.stop() 
-                session_thread.wait(1000) 
+            if session_thread and session_thread.isRunning():
+                session_thread.stop()
+                session_thread.wait(1000)
             del self.active_p2p_sessions[key_to_remove]
-        
-        self._update_peers_ui_list() 
-        self._update_send_button_status() 
+
+        self._update_peers_ui_list()
+        self._update_send_button_status()
+        self._update_manual_tabs_ui() # 新增：更新手动模式选择器
 
     # --- NEW --- 处理 TOFU 验证请求 (主线程中弹出对话框)
-    @pyqtSlot(dict, QThread) 
+    @pyqtSlot(dict, QThread)
     def _handle_tofu_request(self, tofu_info, session_thread):
         print(f"DEBUG: 主线程收到 TOFU 验证请求，来自 {tofu_info['nickname']} ({tofu_info['peer_uuid'][:8]})")
-        
+
         reply = QMessageBox.question(self, "首次使用信任 (TOFU) 验证",
                                      f"您正在与一个新伙伴建立连接：\n\n"
                                      f"昵称: {tofu_info['nickname']}\n"
@@ -804,7 +912,7 @@ class FileEncryptionApp(QMainWindow):
                                      f"请通过其他安全渠道（如电话、短信等）核对上述指纹，以确保没有中间人攻击。\n\n"
                                      f"是否信任此伙伴并继续？",
                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        
+
         if reply == QMessageBox.Yes:
             session_thread.tofu_result = True
             self.identity_manager.add_trusted_peer(
@@ -814,9 +922,10 @@ class FileEncryptionApp(QMainWindow):
         else:
             session_thread.tofu_result = False
             QMessageBox.warning(self, "信任拒绝", f"您已拒绝信任 {tofu_info['nickname']}。连接将被断开。")
-        
-        session_thread.tofu_event.set() 
-        self._update_peers_ui_list() 
+
+        session_thread.tofu_event.set()
+        self._update_peers_ui_list()
+        self._update_manual_tabs_ui() # 新增：更新手动模式选择器
 
     def start_udp_discovery(self):
         if not self.my_uuid or not hasattr(self, 'rsa') or self.rsa.get_public_key() is None:
@@ -828,10 +937,10 @@ class FileEncryptionApp(QMainWindow):
         if advertised_tcp_ip == '0.0.0.0':
             specific_lan_ip = get_suggested_local_ip()
             if specific_lan_ip == '127.0.0.1' or specific_lan_ip == '0.0.0.0':
-                 QMessageBox.warning(self, "网络配置警告", 
+                 QMessageBox.warning(self, "网络配置警告",
                                      f"您选择监听 0.0.0.0，但未能自动检测到合适的局域网IP进行广播。\n"
                                      f"其他节点可能无法通过广播发现您。请考虑在IP栏输入一个具体的局域网IP。")
-                 advertised_tcp_ip = specific_lan_ip 
+                 advertised_tcp_ip = specific_lan_ip
             else:
                  advertised_tcp_ip = specific_lan_ip
             print(f"DEBUG: 监听0.0.0.0，将广播TCP IP为: {advertised_tcp_ip}")
@@ -847,20 +956,20 @@ class FileEncryptionApp(QMainWindow):
         self.udp_discovery_thread = UDPDiscoveryThread(
             my_uuid=self.my_uuid,
             my_nickname=self.my_nickname,
-            my_tcp_ip=advertised_tcp_ip, 
-            my_tcp_port=my_tcp_listen_port, 
+            my_tcp_ip=advertised_tcp_ip,
+            my_tcp_port=my_tcp_listen_port,
             my_pk_fingerprint=self.get_my_public_key_fingerprint()
         )
         self.udp_discovery_thread.peer_discovered.connect(self.handle_peer_discovered)
-        self.udp_discovery_thread.finished.connect(self.on_discovery_thread_finished) 
+        self.udp_discovery_thread.finished.connect(self.on_discovery_thread_finished)
         self.udp_discovery_thread.start()
         self.connection_status.setText("P2P 发现中...")
 
-    def on_discovery_thread_finished(self): 
+    def on_discovery_thread_finished(self):
         print("DEBUG: UDP发现线程已终止。")
         self.connection_status.setText("P2P 发现已停止")
 
-    @pyqtSlot(dict) 
+    @pyqtSlot(dict)
     def handle_peer_discovered(self, peer_info):
         peer_uuid = peer_info.get('uuid')
         if not peer_uuid:
@@ -871,17 +980,17 @@ class FileEncryptionApp(QMainWindow):
 
         self.discovered_peers[peer_uuid] = {
             'nickname': peer_info.get('nickname'),
-            'ip': peer_info.get('ip'), 
+            'ip': peer_info.get('ip'),
             'tcp_port': peer_info.get('tcp_port'),
             'fingerprint': peer_info.get('fingerprint'),
-            'source_ip': peer_info.get('source_ip'), 
-            'source_port': peer_info.get('source_port'), 
+            'source_ip': peer_info.get('source_ip'),
+            'source_port': peer_info.get('source_port'),
             'app_name': peer_info.get('app_name'),
             'protocol_version': peer_info.get('protocol_version'),
-            'last_seen': time.time(), 
-            'status': '在线' 
+            'last_seen': time.time(),
+            'status': '在线'
         }
-        self._update_peer_status_in_dict(peer_uuid) 
+        self._update_peer_status_in_dict(peer_uuid)
         self._update_peers_ui_list()
 
     def _update_peer_status_in_dict(self, peer_uuid):
@@ -889,9 +998,9 @@ class FileEncryptionApp(QMainWindow):
             base_status = '在线'
             if peer_uuid in self.active_p2p_sessions:
                 session = self.active_p2p_sessions[peer_uuid]
-                if session.is_connected: 
+                if session.is_connected:
                     base_status = '已连接'
-            
+
             if self.identity_manager.is_peer_trusted(peer_uuid):
                 self.discovered_peers[peer_uuid]['status'] = f"{base_status} (已信任)"
             else:
@@ -907,10 +1016,10 @@ class FileEncryptionApp(QMainWindow):
 
         self.peers_list_widget.clear()
         current_time = time.time()
-        
+
         # 首先更新所有已知邻居的状态
         for uuid_key in list(self.discovered_peers.keys()):
-            if uuid_key in self.discovered_peers: 
+            if uuid_key in self.discovered_peers:
                 self._update_peer_status_in_dict(uuid_key)
 
         # 按昵称排序邻居
@@ -918,25 +1027,26 @@ class FileEncryptionApp(QMainWindow):
 
         selected_item_to_restore = None
         for uuid_key, peer_data in sorted_peers:
-            if current_time - peer_data.get('last_seen', 0) < PEER_TIMEOUT_S: 
+            if current_time - peer_data.get('last_seen', 0) < PEER_TIMEOUT_S:
                 display_text = f"{peer_data['nickname']} ({peer_data['ip']}:{peer_data['tcp_port']}) - {peer_data['status']}"
                 item = QListWidgetItem(display_text)
-                item.setData(Qt.UserRole, uuid_key) 
+                item.setData(Qt.UserRole, uuid_key)
                 self.peers_list_widget.addItem(item)
-                
+
                 # 如果是之前选中的项，记录下来
                 if uuid_key == current_selected_uuid:
                     selected_item_to_restore = item
-        
+
         # 恢复选中状态
         if selected_item_to_restore:
             # 临时屏蔽信号以避免触发不必要的信号处理
             self.peers_list_widget.blockSignals(True)
             self.peers_list_widget.setCurrentItem(selected_item_to_restore)
             self.peers_list_widget.blockSignals(False)
-            
+
         # 无论是否恢复了选择，都更新按钮状态
         self._update_send_button_status()
+        self._update_manual_tabs_ui() # 新增：在更新邻居列表后，也更新手动模式选择器
 
     def _check_peer_timeouts(self):
         current_time = time.time()
@@ -948,16 +1058,17 @@ class FileEncryptionApp(QMainWindow):
                 if uuid_key in self.active_p2p_sessions:
                     session_thread = self.active_p2p_sessions[uuid_key]
                     if session_thread and session_thread.isRunning():
-                        session_thread.stop() 
+                        session_thread.stop()
                         session_thread.wait(1000)
-                    del self.active_p2p_sessions[uuid_key] 
+                    del self.active_p2p_sessions[uuid_key]
                 del self.discovered_peers[uuid_key]
                 peers_changed = True
-        
+
         if peers_changed:
             self._update_peers_ui_list()
-            self._update_send_button_status() 
-            
+            self._update_send_button_status()
+            self._update_manual_tabs_ui() # 新增：在邻居超时移除后，也更新手动模式选择器
+
         def start_listen(self):
             QMessageBox.information(self, "提示", "P2P 模式下，程序将自动监听，无需手动启动。")
 
@@ -966,10 +1077,10 @@ class FileEncryptionApp(QMainWindow):
 
     def update_connection_status(self, connected, message):
         self.connection_status.setText(message)
-        self._update_send_button_status() 
+        self._update_send_button_status()
 
-    def on_network_thread_finished(self): 
-        self.connection_status.setText("P2P 发现中...") 
+    def on_network_thread_finished(self):
+        self.connection_status.setText("P2P 发现中...")
         self._update_send_button_status()
 
     def _create_new_temp_dir(self):
@@ -980,7 +1091,7 @@ class FileEncryptionApp(QMainWindow):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         zip_filename = f"secure_package_{timestamp}.zip"
         zip_path = os.path.join(packaging_temp_dir, zip_filename)
-        
+
         original_base_filename = os.path.basename(file_path)
         encryption_type = 'UNKNOWN'
         if '.AES.enc' in original_base_filename:
@@ -989,7 +1100,7 @@ class FileEncryptionApp(QMainWindow):
         elif '.DES.enc' in original_base_filename:
             encryption_type = 'DES'
             original_base_filename = original_base_filename.replace('.DES.enc', '')
-        
+
         metadata_content = {
             'timestamp': timestamp,
             'original_filename': original_base_filename,
@@ -1001,11 +1112,11 @@ class FileEncryptionApp(QMainWindow):
             zipf.write(file_path, os.path.basename(file_path))
             zipf.write(key_path, os.path.basename(key_path))
             zipf.write(sig_path, os.path.basename(sig_path))
-            with open(metadata_file_path, 'w', encoding='utf-8') as f: 
-                json.dump(metadata_content, f, indent=4, ensure_ascii=False) 
+            with open(metadata_file_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata_content, f, indent=4, ensure_ascii=False)
             zipf.write(metadata_file_path, 'metadata.json')
-        
-        os.remove(metadata_file_path) 
+
+        os.remove(metadata_file_path)
         return zip_path, packaging_temp_dir
 
     def unpack_files(self, zip_path):
@@ -1015,33 +1126,33 @@ class FileEncryptionApp(QMainWindow):
             with zipfile.ZipFile(zip_path, 'r') as zipf:
                 if 'metadata.json' not in zipf.namelist():
                     raise ValueError("压缩包中缺少 metadata.json 文件。")
-                
+
                 with zipf.open('metadata.json', 'r') as meta_f:
                     metadata = json.load(meta_f)
-                
+
                 zipf.extractall(extract_target_dir)
         except Exception as e:
             if os.path.exists(extract_target_dir):
                 shutil.rmtree(extract_target_dir)
             raise Exception(f"解包文件失败: {e}")
-        
+
         return extract_target_dir, metadata
 
-    @pyqtSlot(str, str) 
+    @pyqtSlot(str, str)
     def handle_message(self, message_str, peer_uuid):
         if peer_uuid not in self.active_p2p_sessions:
             print(f"DEBUG: 收到来自未知会话 {peer_uuid[:8]} 的消息，忽略。")
             return
 
         try:
-            data = json.loads(message_str) 
-            if data.get('type') == MSG_TYPE_KEY_EXCHANGE: 
+            data = json.loads(message_str)
+            if data.get('type') == MSG_TYPE_KEY_EXCHANGE:
                 print(f"DEBUG: UI 收到来自 {peer_uuid[:8]} 的密钥交换确认消息。")
-                return 
+                return
 
             elif data.get('type') == 'package': # 旧的文件传输格式
-                self.progress_bar.setVisible(True) 
-                self.progress_bar.setRange(0,0) 
+                self.progress_bar.setVisible(True)
+                self.progress_bar.setRange(0,0)
 
                 package_receive_temp_dir = None
                 extraction_temp_dir = None
@@ -1052,24 +1163,24 @@ class FileEncryptionApp(QMainWindow):
                     received_zip_path = os.path.join(package_receive_temp_dir, 'received_package.zip')
                     with open(received_zip_path, 'wb') as f:
                         f.write(package_data_bytes)
-                    
+
                     extraction_temp_dir, metadata = self.unpack_files(received_zip_path)
-                    
+
                     original_base_filename = metadata.get('original_filename', 'decrypted_file')
-                    algo = metadata.get('encryption_type', 'AES') 
+                    algo = metadata.get('encryption_type', 'AES')
 
                     enc_file_name_in_zip = None
                     rsa_key_name_in_zip = None
                     sig_name_in_zip = None
 
                     for item in os.listdir(extraction_temp_dir):
-                        if item.endswith(f'.{algo}.enc'): 
+                        if item.endswith(f'.{algo}.enc'):
                             enc_file_name_in_zip = item
-                        elif item.endswith(f'.{algo}.key.txt.rsa'): 
+                        elif item.endswith(f'.{algo}.key.txt.rsa'):
                             rsa_key_name_in_zip = item
-                        elif item.endswith(f'.{algo}.enc.sha256sig'): 
+                        elif item.endswith(f'.{algo}.enc.sha256sig'):
                             sig_name_in_zip = item
-                    
+
                     if not all([enc_file_name_in_zip, rsa_key_name_in_zip, sig_name_in_zip]):
                         raise FileNotFoundError("解压后的文件中未能找到所有必需的文件 (加密文件、RSA密钥、签名)。")
 
@@ -1079,43 +1190,42 @@ class FileEncryptionApp(QMainWindow):
 
                     with open(rsa_key_path, 'rb') as f:
                         rsa_encrypted_key = f.read()
-                    key = self.rsa.decrypt(rsa_encrypted_key) 
-                    
+                    key = self.rsa.decrypt(rsa_encrypted_key)
+
                     with open(enc_file_path, 'rb') as f:
                         encrypted_file_data = f.read()
-                    
+
                     cipher = AES(key) if algo == 'AES' else DES(key)
                     block_size = 16 if algo == 'AES' else 8
-                    
+
                     decrypted_data = b''
                     for i in range(0, len(encrypted_file_data), block_size):
                         block = encrypted_file_data[i:i+block_size]
                         decrypted_data += cipher.decrypt(block)
-                    decrypted_data = self.pkcs7_unpad(decrypted_data) 
-                    
+                    decrypted_data = self.pkcs7_unpad(decrypted_data)
+
                     hash_of_encrypted_file = hashlib.sha256(encrypted_file_data).digest()
                     with open(sig_path, 'rb') as f:
                         signature = f.read()
-                    
+
                     sender_public_key_pem = self.identity_manager.get_trusted_peer_pubkey_pem(peer_uuid)
                     if not sender_public_key_pem:
                         raise Exception(f"无法获取邻居 {peer_uuid[:8]} 的信任公钥，无法验证签名。")
-                    
+
                     temp_rsa_verifier = RSA()
-                    temp_rsa_verifier.set_public_key_from_pem(sender_public_key_pem) 
-                    
-                    if not temp_rsa_verifier.verify(hash_of_encrypted_file, signature): 
+                    temp_rsa_verifier.set_public_key_from_pem(sender_public_key_pem)
+                    if not temp_rsa_verifier.verify(hash_of_encrypted_file, signature):
                         raise Exception("签名验证失败! 文件可能被篡改或来自不受信任的发送方。")
-                    
+
                     save_path, _ = QFileDialog.getSaveFileName(
-                        self, "保存解密文件", original_base_filename 
+                        self, "保存解密文件", original_base_filename
                     )
                     if save_path:
                         with open(save_path, 'wb') as f:
                             f.write(decrypted_data)
                         self.receive_status_label.setText("文件接收完成")
                         self.receive_status_label.setStyleSheet("""
-                            color: #4CAF50; 
+                            color: #4CAF50;
                             font-weight: bold;
                             padding: 10px;
                             background-color: #e8f5e9;
@@ -1127,7 +1237,7 @@ class FileEncryptionApp(QMainWindow):
                     else:
                         self.receive_status_label.setText("文件接收已取消")
                         self.receive_status_label.setStyleSheet("""
-                            color: #f44336; 
+                            color: #f44336;
                             font-weight: bold;
                             padding: 10px;
                             background-color: #ffebee;
@@ -1137,23 +1247,23 @@ class FileEncryptionApp(QMainWindow):
                         self.status_tip_label.setText("文件解密成功，但未保存。")
                         QMessageBox.warning(self.parent(), "操作取消", "文件解密成功，但未保存。")
 
-                except ValueError as ve: 
+                except ValueError as ve:
                     QMessageBox.critical(self, "数据错误", f"处理接收数据失败: {str(ve)}")
                 except FileNotFoundError as fnfe:
                     QMessageBox.critical(self, "文件错误", f"处理接收数据失败: {str(fnfe)}")
                 except Exception as e:
-                    QMessageBox.critical(self.parent_window, "处理错误", f"处理接收数据失败: {repr(e)}") 
+                    QMessageBox.critical(self.parent_window, "处理错误", f"处理接收数据失败: {repr(e)}")
                 finally:
                     if package_receive_temp_dir and os.path.exists(package_receive_temp_dir):
                         shutil.rmtree(package_receive_temp_dir)
                     if extraction_temp_dir and os.path.exists(extraction_temp_dir):
                         shutil.rmtree(extraction_temp_dir)
                     self.progress_bar.setVisible(False)
-                    self.progress_bar.setRange(0,100) 
-            elif data.get('type') == MSG_TYPE_FILE_TRANSFER: 
+                    self.progress_bar.setRange(0,100)
+            elif data.get('type') == MSG_TYPE_FILE_TRANSFER:
                 self.progress_bar.setVisible(True)
-                self.progress_bar.setRange(0, 100) 
-                
+                self.progress_bar.setRange(0, 100)
+
                 metadata = data.get('metadata', {})
                 encrypted_file_data_hex = data.get('encrypted_file_data')
                 encrypted_symmetric_key_hex = data.get('encrypted_symmetric_key')
@@ -1169,19 +1279,20 @@ class FileEncryptionApp(QMainWindow):
                 sender_public_key_pem = self.identity_manager.get_trusted_peer_pubkey_pem(sender_uuid_from_msg)
                 if not sender_public_key_pem:
                     raise Exception(f"无法获取发送方 {sender_uuid_from_msg[:8]} 的信任公钥，无法验证签名和解密。")
-                
+
                 encrypted_file_data_bytes = bytes.fromhex(encrypted_file_data_hex)
                 file_hash = hashlib.sha256(encrypted_file_data_bytes).digest()
                 signature_bytes = bytes.fromhex(signature_hex)
 
                 temp_rsa_verifier = RSA()
-                temp_rsa_verifier.set_public_key_from_pem(sender_public_key_pem) 
+                temp_rsa_verifier.set_public_key_from_pem(sender_public_key_pem)
                 if not temp_rsa_verifier.verify(file_hash, signature_bytes):
                     raise Exception("文件签名验证失败！文件可能被篡改或来自非信任来源。")
                 print("DEBUG: 文件签名验证成功。")
 
                 encrypted_symmetric_key_bytes = bytes.fromhex(encrypted_symmetric_key_hex)
-                symmetric_key = self.rsa.decrypt(encrypted_symmetric_key_bytes) 
+                symmetric_key = self.rsa.decrypt(encrypted_symmetric_key_bytes) # 使用本机私钥解密对称密钥
+                print("DEBUG: 对称密钥解密成功。")
 
                 algo = metadata.get('encryption_type', 'AES')
                 cipher = AES(symmetric_key) if algo == 'AES' else DES(symmetric_key)
@@ -1207,7 +1318,7 @@ class FileEncryptionApp(QMainWindow):
                         f.write(decrypted_file_data)
                     self.receive_status_label.setText("文件接收完成")
                     self.receive_status_label.setStyleSheet("""
-                        color: #4CAF50; 
+                        color: #4CAF50;
                         font-weight: bold;
                         padding: 10px;
                         background-color: #e8f5e9;
@@ -1219,7 +1330,7 @@ class FileEncryptionApp(QMainWindow):
                 else:
                     self.receive_status_label.setText("文件接收已取消")
                     self.receive_status_label.setStyleSheet("""
-                        color: #f44336; 
+                        color: #f44336;
                         font-weight: bold;
                         padding: 10px;
                         background-color: #ffebee;
@@ -1227,14 +1338,14 @@ class FileEncryptionApp(QMainWindow):
                         border: 1px solid #e57373;
                     """)
                     self.status_tip_label.setText("文件解密成功，但未保存。")
-                    QMessageBox.warning(self.parent(), "操作取消", "文件解密成功，但未保存。") 
+                    QMessageBox.warning(self.parent(), "操作取消", "文件解密成功，但未保存。")
 
             else:
                 print(f"DEBUG: 收到未知类型的消息: {data.get('type')}")
         except json.JSONDecodeError:
             print(f"DEBUG: 无法解析接收到的消息为 JSON: {message_str[:100]}...")
         except Exception as e:
-            QMessageBox.critical(self.parent(), "处理接收文件错误", f"处理接收文件失败: {repr(e)}") 
+            QMessageBox.critical(self.parent(), "处理接收文件错误", f"处理接收文件失败: {repr(e)}")
         finally:
             self.progress_bar.setVisible(False)
             self.progress_bar.setValue(0)
@@ -1243,14 +1354,14 @@ class FileEncryptionApp(QMainWindow):
         if hasattr(self, 'udp_discovery_thread') and self.udp_discovery_thread and self.udp_discovery_thread.isRunning():
             print("DEBUG: 正在停止UDP发现线程...")
             self.udp_discovery_thread.stop()
-            self.udp_discovery_thread.wait(2000) 
+            self.udp_discovery_thread.wait(2000)
 
         if hasattr(self, 'tcp_listener_thread') and self.tcp_listener_thread and self.tcp_listener_thread.isRunning():
             print("DEBUG: 正在停止TCP监听线程...")
             self.tcp_listener_thread.stop()
             self.tcp_listener_thread.wait(2000)
 
-        for uuid_key, session_thread in list(self.active_p2p_sessions.items()): 
+        for uuid_key, session_thread in list(self.active_p2p_sessions.items()):
             if session_thread and session_thread.isRunning():
                 print(f"DEBUG: 正在停止 P2P 会话线程 {uuid_key[:8] if isinstance(uuid_key, str) else uuid_key}...")
                 session_thread.stop()
@@ -1263,18 +1374,18 @@ class FileEncryptionApp(QMainWindow):
 
     def select_enc_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "选择文件", filter="所有文件 (*.*)")
-        if file_name: 
+        if file_name:
             self.enc_file_label.setText(file_name)
-            self._update_send_button_status() 
+            self._update_send_button_status()
 
     def encrypt_file(self):
         try:
             file_path = self.enc_file_label.text()
             if file_path == '未选择文件': raise Exception("请先选择文件")
             algo = self.enc_algo_combo.currentText()
-            key_len = 32 if algo == 'AES' else 8 
+            key_len = 32 if algo == 'AES' else 8
             key = os.urandom(key_len)
-            
+
             base_dir = os.path.dirname(file_path)
             file_basename = os.path.basename(file_path)
             key_txt_path = os.path.join(base_dir, f"{file_basename}.{algo}.key.txt")
@@ -1282,39 +1393,79 @@ class FileEncryptionApp(QMainWindow):
 
             with open(key_txt_path, 'w') as f: f.write(key.hex())
             with open(file_path, 'rb') as f: data = f.read()
-            
+
             cipher = AES(key) if algo == 'AES' else DES(key)
             block_size = 16 if algo == 'AES' else 8
             data_padded = self.pkcs7_pad(data, block_size)
-            
+
             encrypted_data = b''
             for i in range(0, len(data_padded), block_size):
                 encrypted_data += cipher.encrypt(data_padded[i:i+block_size])
-            
+
             with open(enc_out_path, 'wb') as f: f.write(encrypted_data)
             self.enc_key_path_label.setText(f'明文密钥txt路径: {key_txt_path}')
             self.enc_out_path_label.setText(f'加密文件路径: {enc_out_path}')
-            QMessageBox.information(self.parent(), "成功", f"{algo} 加密完成。") 
+            QMessageBox.information(self.parent(), "成功", f"{algo} 加密完成。")
         except Exception as e:
-            QMessageBox.critical(self.parent(), "错误", f"加密过程中出错：{str(e)}") 
+            QMessageBox.critical(self.parent(), "错误", f"加密过程中出错：{str(e)}")
 
     def select_key_enc_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "选择明文密钥txt", filter="密钥文件 (*.key.txt)")
         if file_name: self.key_enc_file_label.setText(file_name)
 
     def key_encrypt(self):
+        """
+        根据当前操作模式和用户选择，使用本机公钥或目标邻居的公钥加密对称密钥。
+        """
         try:
             key_txt_path = self.key_enc_file_label.text()
-            if key_txt_path == '未选择明文密钥txt': raise Exception("请先选择明文密钥txt")
+            if key_txt_path == '未选择明文密钥txt':
+                raise Exception("请先选择明文密钥txt")
             with open(key_txt_path, 'r') as f:
                 key = bytes.fromhex(f.read().strip())
-            rsa_encrypted_key = self.rsa.encrypt(key) 
+
+            target_public_key_pem = None
+            temp_rsa_encryptor = RSA() # 创建临时RSA实例用于加载目标公钥
+
+            if self.operation_mode == LOCAL_MODE:
+                # 本地模式：使用本机公钥加密
+                if not self.rsa.e or not self.rsa.n:
+                    raise Exception("本机RSA公钥未加载，无法进行密钥加密。")
+                target_public_key_pem = self.identity_manager.get_my_public_key_pem() # 获取本机公钥PEM
+                # temp_rsa_encryptor 实际上不需要，直接用 self.rsa 即可，但为了代码结构统一，可以这样写
+                e_val, n_val = RSA.get_e_n_from_pem(target_public_key_pem)
+                temp_rsa_encryptor.set_public_key(e_val, n_val)
+                QMessageBox.information(self, "本地模式", "将使用本机公钥加密密钥。")
+            elif self.operation_mode == P2P_MODE:
+                # P2P模式：使用选择的邻居公钥加密
+                selected_item_data = self.key_enc_target_peer_combo.currentData(Qt.UserRole)
+                if not selected_item_data:
+                    raise Exception("请在 P2P 模式下选择一个已信任的邻居作为密钥加密的目标。")
+
+                target_peer_uuid = selected_item_data['uuid']
+                target_public_key_pem = self.identity_manager.get_trusted_peer_pubkey_pem(target_peer_uuid)
+
+                if not target_public_key_pem:
+                    raise Exception(f"无法获取邻居 {target_peer_uuid[:8]} 的信任公钥。")
+
+                try:
+                    e_val, n_val = RSA.get_e_n_from_pem(target_public_key_pem)
+                    temp_rsa_encryptor.set_public_key(e_val, n_val)
+                except Exception as e_pem:
+                     raise Exception(f"无法从PEM设置目标公钥: {e_pem}")
+
+                QMessageBox.information(self, "P2P模式", f"将使用 {selected_item_data['nickname']} 的公钥加密密钥。")
+            else:
+                raise Exception("未知的操作模式。")
+
+            rsa_encrypted_key = temp_rsa_encryptor.encrypt(key)
             rsa_key_path = key_txt_path + '.rsa'
-            with open(rsa_key_path, 'wb') as f: f.write(rsa_encrypted_key)
+            with open(rsa_key_path, 'wb') as f:
+                f.write(rsa_encrypted_key)
             self.key_enc_out_path_label.setText(f'RSA加密密钥文件路径: {rsa_key_path}')
-            QMessageBox.information(self.parent(), "成功", "密钥加密完成。") 
+            QMessageBox.information(self.parent(), "成功", "密钥加密完成。")
         except Exception as e:
-            QMessageBox.critical(self.parent(), "错误", f"密钥加密过程中出错：{str(e)}") 
+            QMessageBox.critical(self.parent(), "错误", f"密钥加密过程中出错：{str(e)}")
 
     def select_sign_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "选择加密文件", filter="加密文件 (*.enc)")
@@ -1326,13 +1477,13 @@ class FileEncryptionApp(QMainWindow):
             if file_path == '未选择文件': raise Exception("请先选择文件")
             with open(file_path, 'rb') as f: data = f.read()
             hash_of_data = hashlib.sha256(data).digest()
-            signature = self.rsa.sign(hash_of_data) 
+            signature = self.rsa.sign(hash_of_data)
             sign_path = file_path + '.sha256sig'
             with open(sign_path, 'wb') as f: f.write(signature)
             self.sign_path_label.setText(f'签名文件路径: {sign_path}')
-            QMessageBox.information(self.parent(), "成功", "文件签名完成。") 
+            QMessageBox.information(self.parent(), "成功", "文件签名完成。")
         except Exception as e:
-            QMessageBox.critical(self.parent(), "错误", f"签名过程中出错：{str(e)}") 
+            QMessageBox.critical(self.parent(), "错误", f"签名过程中出错：{str(e)}")
 
     def select_auth_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "选择加密文件", filter="加密文件 (*.enc)")
@@ -1343,19 +1494,56 @@ class FileEncryptionApp(QMainWindow):
         if file_name: self.auth_sig_label.setText(file_name)
 
     def auth_verify(self):
+        """
+        根据当前操作模式和用户选择，使用本机公钥或签名者邻居的公钥验证签名。
+        """
         try:
             file_path = self.auth_file_label.text()
             sig_path = self.auth_sig_label.text()
             if file_path == '未选择原始文件' or sig_path == '未选择签名文件':
-                raise Exception("请先选择原始文件和签名文件")
+                raise Exception("请先选择加密文件和签名文件")
             with open(file_path, 'rb') as f: data = f.read()
             hash_of_data = hashlib.sha256(data).digest()
             with open(sig_path, 'rb') as f: signature = f.read()
-            result = self.rsa.verify(hash_of_data, signature) 
+
+            signer_public_key_pem = None
+            temp_rsa_verifier = RSA() # 创建临时RSA实例用于加载签名者公钥
+
+            if self.operation_mode == LOCAL_MODE:
+                # 本地模式：使用本机公钥验证
+                if not self.rsa.e or not self.rsa.n:
+                    raise Exception("本机RSA公钥未加载，无法进行签名认证。")
+                signer_public_key_pem = self.identity_manager.get_my_public_key_pem()
+                # temp_rsa_verifier 实际上不需要，直接用 self.rsa 即可，但为了代码结构统一，可以这样写
+                e_val, n_val = RSA.get_e_n_from_pem(signer_public_key_pem)
+                temp_rsa_verifier.set_public_key(e_val, n_val)
+                QMessageBox.information(self, "本地模式", "将使用本机公钥认证签名。")
+            elif self.operation_mode == P2P_MODE:
+                # P2P模式：使用选择的邻居公钥验证
+                selected_item_data = self.auth_signer_combo.currentData(Qt.UserRole)
+                if not selected_item_data:
+                    raise Exception("请在 P2P 模式下选择一个已信任的邻居作为签名者。")
+
+                signer_peer_uuid = selected_item_data['uuid']
+                signer_public_key_pem = self.identity_manager.get_trusted_peer_pubkey_pem(signer_peer_uuid)
+
+                if not signer_public_key_pem:
+                    raise Exception(f"无法获取邻居 {signer_peer_uuid[:8]} 的信任公钥。")
+
+                try:
+                    e_val, n_val = RSA.get_e_n_from_pem(signer_public_key_pem)
+                    temp_rsa_verifier.set_public_key(e_val, n_val)
+                except Exception as e_pem:
+                     raise Exception(f"无法从PEM设置签名者公钥: {e_pem}")
+                QMessageBox.information(self, "P2P模式", f"将使用 {selected_item_data['nickname']} 的公钥认证签名。")
+            else:
+                raise Exception("未知的操作模式。")
+
+            result = temp_rsa_verifier.verify(hash_of_data, signature)
             self.auth_result_label.setText(f'认证结果: {"签名有效" if result else "签名无效"}')
-            QMessageBox.information(self.parent(), "认证", f"认证结果: {'签名有效' if result else '签名无效'}") 
+            QMessageBox.information(self.parent(), "认证", f"认证结果: {'签名有效' if result else '签名无效'}")
         except Exception as e:
-            QMessageBox.critical(self.parent(), "错误", f"认证过程中出错：{str(e)}") 
+            QMessageBox.critical(self.parent(), "错误", f"认证过程中出错：{str(e)}")
 
     def select_key_dec_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "选择RSA加密密钥文件", filter="RSA密钥文件 (*.rsa)")
@@ -1366,13 +1554,13 @@ class FileEncryptionApp(QMainWindow):
             rsa_key_path = self.key_dec_file_label.text()
             if rsa_key_path == '未选择RSA加密密钥文件': raise Exception("请先选择RSA加密密钥文件")
             with open(rsa_key_path, 'rb') as f: rsa_encrypted_key = f.read()
-            key = self.rsa.decrypt(rsa_encrypted_key) 
+            key = self.rsa.decrypt(rsa_encrypted_key)
             key_txt_path = rsa_key_path.replace('.rsa', '.decrypted.txt')
             with open(key_txt_path, 'w') as f: f.write(key.hex())
             self.key_dec_out_path_label.setText(f'明文密钥txt路径: {key_txt_path}')
-            QMessageBox.information(self.parent(), "成功", "密钥解密完成。") 
+            QMessageBox.information(self.parent(), "成功", "密钥解密完成。")
         except Exception as e:
-            QMessageBox.critical(self.parent(), "错误", f"密钥解密过程中出错：{str(e)}") 
+            QMessageBox.critical(self.parent(), "错误", f"密钥解密过程中出错：{str(e)}")
 
     def select_file_dec_file(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "选择加密文件", filter="加密文件 (*.enc)")
@@ -1391,7 +1579,7 @@ class FileEncryptionApp(QMainWindow):
             algo = self.file_dec_algo_combo.currentText()
             with open(key_path, 'r') as f: key = bytes.fromhex(f.read().strip())
             with open(file_path, 'rb') as f: encrypted_data = f.read()
-            
+
             cipher = AES(key) if algo == 'AES' else DES(key)
             block_size = 16 if algo == 'AES' else 8
             decrypted_data = b''
@@ -1399,20 +1587,24 @@ class FileEncryptionApp(QMainWindow):
                 block = encrypted_data[i:i+block_size]
                 decrypted_data += cipher.decrypt(block)
             decrypted_data = self.pkcs7_unpad(decrypted_data)
-            
-            dec_out_path = file_path + f'.{algo}.dec'
-            with open(dec_out_path, 'wb') as f: f.write(decrypted_data)
-            
-            original_name = file_path.replace(f'.{algo}.enc', '')
-            if original_name and os.path.basename(original_name):
-                with open(original_name, 'wb') as f: f.write(decrypted_data)
-                self.file_dec_out_path_label.setText(f'解密文件路径: {dec_out_path}\n原始文件名解密文件路径: {original_name}')
+
+            # 改进文件保存路径的推断，尝试移除加密后缀
+            base_name = os.path.basename(file_path)
+            original_name_guess = base_name.replace(f'.{algo}.enc', '')
+            if not original_name_guess or original_name_guess == base_name:
+                # 如果替换后没有变化或者为空，说明文件名不包含预期后缀，则直接用加密文件名+dec
+                dec_out_path = file_path + f'.dec'
             else:
-                self.file_dec_out_path_label.setText(f'解密文件路径: {dec_out_path}\n(无法推断原始文件名，未创建)')
-            
-            QMessageBox.information(self.parent(), "成功", "文件解密完成。") 
+                # 如果成功推断出原始文件名，则直接使用它
+                dec_out_path = os.path.join(os.path.dirname(file_path), original_name_guess)
+
+            with open(dec_out_path, 'wb') as f: f.write(decrypted_data)
+
+            self.file_dec_out_path_label.setText(f'解密文件路径: {dec_out_path}')
+
+            QMessageBox.information(self.parent(), "成功", "文件解密完成。")
         except Exception as e:
-            QMessageBox.critical(self.parent(), "错误", f"解密过程中出错：{str(e)}") 
+            QMessageBox.critical(self.parent(), "错误", f"解密过程中出错：{str(e)}")
 
     def pkcs7_pad(self, data, block_size):
         if not isinstance(data, bytes): raise TypeError("数据必须是字节类型才能进行填充")
@@ -1422,9 +1614,9 @@ class FileEncryptionApp(QMainWindow):
     def pkcs7_unpad(self, data):
         if not data: raise ValueError("数据为空，无法去除填充")
         pad_len = data[-1]
-        if not (1 <= pad_len <= len(data) and pad_len <= 16): 
+        if not (1 <= pad_len <= len(data) and pad_len <= 16):
             raise ValueError(f"填充长度无效: {pad_len}。可能数据已损坏或未正确填充。")
-        
+
         expected_padding = bytes([pad_len] * pad_len)
         if data[-pad_len:] != expected_padding:
             raise ValueError("填充内容无效 (PKCS#7 验证失败)。数据可能已损坏。")
@@ -1434,6 +1626,7 @@ class FileEncryptionApp(QMainWindow):
         self.identity_manager._create_new_rsa_identity_keys()
         self._my_public_key_pem = self.identity_manager.get_my_public_key_pem()
         self.my_fingerprint_label.setText(f"<b>公钥指纹:</b> {self.get_my_public_key_fingerprint()[:16]}...")
+        self._update_manual_tabs_ui() # 新增：生成新密钥对后更新手动模式选择器
 
     def export_public_key(self):
         try:
@@ -1443,11 +1636,11 @@ class FileEncryptionApp(QMainWindow):
                 if public_pem:
                     with open(file_name, 'wb') as f:
                         f.write(public_pem)
-                    QMessageBox.information(self.parent(), "成功", "公钥导出成功") 
+                    QMessageBox.information(self.parent(), "成功", "公钥导出成功")
                 else:
-                    QMessageBox.warning(self.parent(), "警告", "当前没有有效的公钥可导出。") 
+                    QMessageBox.warning(self.parent(), "警告", "当前没有有效的公钥可导出。")
         except Exception as e:
-            QMessageBox.critical(self.parent(), "错误", f"导出公钥失败: {str(e)}") 
+            QMessageBox.critical(self.parent(), "错误", f"导出公钥失败: {str(e)}")
 
     def export_private_key(self):
         self.identity_manager.export_private_key_to_file()
@@ -1466,44 +1659,51 @@ class FileEncryptionApp(QMainWindow):
         # 添加到trusted_peers.json
         self.identity_manager.add_trusted_peer(peer_uuid, peer_name, public_pem.decode('utf-8'))
         QMessageBox.information(self, "导入成功", f"已将 {peer_name} 的公钥导入到 trusted_peers.json")
+        self._update_manual_tabs_ui() # 新增：导入信任公钥后更新手动模式选择器
 
     def import_public_key(self):
         self.identity_manager.import_public_key_from_file()
         self._my_public_key_pem = self.identity_manager.get_my_public_key_pem()
         self.my_fingerprint_label.setText(f"<b>公钥指纹:</b> {self.get_my_public_key_fingerprint()[:16]}...")
+        self._update_manual_tabs_ui() # 新增：导入公钥后更新手动模式选择器
 
     def import_private_key(self):
         self.identity_manager.import_private_key_from_file()
         self._my_public_key_pem = self.identity_manager.get_my_public_key_pem()
         self.my_fingerprint_label.setText(f"<b>公钥指纹:</b> {self.get_my_public_key_fingerprint()[:16]}...")
+        self._update_manual_tabs_ui() # 新增：导入私钥后更新手动模式选择器
 
 
     def select_file_to_send(self):
         file_name, _ = QFileDialog.getOpenFileName(self, "选择文件", filter="所有文件 (*.*)")
-        if file_name: 
+        if file_name:
             self.selected_file_label.setText(file_name)
-            self._update_send_button_status() 
+            self._update_send_button_status()
 
     def quick_send(self):
-        if not self.selected_file_label.text() or self.selected_file_label.text() == "未选择文件":
-            QMessageBox.warning(self.parent(), "发送错误", "请先选择要发送的文件。") 
+        if self.operation_mode != P2P_MODE:
+            QMessageBox.warning(self, "发送错误", "当前为本地模拟模式，无法进行P2P文件发送。请切换到P2P远程传输模式。")
             return
-        
+
+        if not self.selected_file_label.text() or self.selected_file_label.text() == "未选择文件":
+            QMessageBox.warning(self.parent(), "发送错误", "请先选择要发送的文件。")
+            return
+
         selected_items = self.peers_list_widget.selectedItems()
         if not selected_items:
             QMessageBox.warning(self.parent(), "发送错误", "请从'发现的邻居'列表中选择一个接收方。")
             return
-        
+
         selected_peer_uuid = selected_items[0].data(Qt.UserRole)
         target_session = self.active_p2p_sessions.get(selected_peer_uuid)
 
         if not target_session or not target_session.is_connected:
-            QMessageBox.warning(self.parent(), "发送错误", "选定的邻居未连接或连接不稳定，请重新连接。") 
+            QMessageBox.warning(self.parent(), "发送错误", "选定的邻居未连接或连接不稳定，请重新连接。")
             return
-        
+
         recipient_public_key_pem = self.identity_manager.get_trusted_peer_pubkey_pem(selected_peer_uuid)
         if not recipient_public_key_pem:
-            QMessageBox.warning(self.parent(), "发送错误", "无法获取接收方信任的公钥，请先进行信任验证。") 
+            QMessageBox.warning(self.parent(), "发送错误", "无法获取接收方信任的公钥，请先进行信任验证。")
             return
 
         try:
@@ -1512,8 +1712,8 @@ class FileEncryptionApp(QMainWindow):
             self.status_tip_label.setText("正在准备发送文件...")
 
             file_path = self.selected_file_label.text()
-            algo = 'AES' 
-            key_bytes = os.urandom(32) 
+            algo = 'AES'
+            key_bytes = os.urandom(32)
 
             temp_rsa_encryptor = RSA()
             try:
@@ -1522,11 +1722,11 @@ class FileEncryptionApp(QMainWindow):
             except Exception as e_pem:
                  raise Exception(f"无法从PEM设置接收方公钥: {e_pem}")
 
-            rsa_encrypted_key_data = temp_rsa_encryptor.encrypt(key_bytes) 
-            
+            rsa_encrypted_key_data = temp_rsa_encryptor.encrypt(key_bytes)
+
             with open(file_path, 'rb') as f: data = f.read()
-            cipher = AES(key_bytes) 
-            block_size = 16 
+            cipher = AES(key_bytes)
+            block_size = 16
             data_padded = self.pkcs7_pad(data, block_size)
             encrypted_file_data = b''
             for i in range(0, len(data_padded), block_size):
@@ -1534,43 +1734,47 @@ class FileEncryptionApp(QMainWindow):
             self.progress_bar.setValue(30)
 
             hash_of_encrypted_data = hashlib.sha256(encrypted_file_data).digest()
-            signature_data = self.rsa.sign(hash_of_encrypted_data) 
+            signature_data = self.rsa.sign(hash_of_encrypted_data)
             self.progress_bar.setValue(50)
 
             original_filename = os.path.basename(file_path)
             message_payload = {
-                'type': MSG_TYPE_FILE_TRANSFER, 
+                'type': MSG_TYPE_FILE_TRANSFER,
                 'metadata': {
                     'original_filename': original_filename,
                     'encryption_type': algo,
-                    'file_size': len(encrypted_file_data) 
+                    'file_size': len(encrypted_file_data)
                 },
-                'encrypted_file_data': encrypted_file_data.hex(), 
-                'encrypted_symmetric_key': rsa_encrypted_key_data.hex(), 
-                'signature': signature_data.hex(), 
-                'sender_uuid': self.my_uuid 
+                'encrypted_file_data': encrypted_file_data.hex(),
+                'encrypted_symmetric_key': rsa_encrypted_key_data.hex(),
+                'signature': signature_data.hex(),
+                'sender_uuid': self.my_uuid
             }
             json_to_send = json.dumps(message_payload).encode('utf-8')
             self.progress_bar.setValue(80)
-            
+
             if not target_session.send_data_to_peer(json_to_send):
                 raise Exception("通过网络线程发送文件数据失败。")
             self.progress_bar.setValue(100)
             self.status_tip_label.setText(f"文件已成功发送给 {target_session.peer_nickname}")
             QMessageBox.information(self, "成功", f"文件已成功发送给 {target_session.peer_nickname}。")
-            
+
         except Exception as e:
             self.progress_bar.setVisible(False)
             self.status_tip_label.setText(f"发送失败: {str(e)}")
-            QMessageBox.critical(self.parent(), "发送失败", f"文件发送过程中出错: {repr(e)}") 
+            QMessageBox.critical(self.parent(), "发送失败", f"文件发送过程中出错: {repr(e)}")
         finally:
             self.progress_bar.setVisible(False)
             self.progress_bar.setValue(0)
 
     def quick_receive_setup(self):
+        if self.operation_mode != P2P_MODE:
+            QMessageBox.warning(self, "接收错误", "当前为本地模拟模式，无法进行P2P文件接收。请切换到P2P远程传输模式。")
+            return
+
         self.receive_status_label.setText("正在等待接收文件...")
         self.receive_status_label.setStyleSheet("""
-            color: #2196F3; 
+            color: #2196F3;
             font-weight: bold;
             padding: 10px;
             background-color: #e3f2fd;
@@ -1585,7 +1789,20 @@ class FileEncryptionApp(QMainWindow):
         """
         根据是否选择了文件、是否选择了邻居以及所选邻居是否已连接且受信任，
         来更新"一键发送"按钮的启用状态。
+        同时，在本地模式下禁用一键发送/接收。
         """
+        if self.operation_mode == LOCAL_MODE:
+            self.send_btn.setEnabled(False)
+            self.receive_btn.setEnabled(False)
+            self.receive_status_label.setText("本地模式下无法接收P2P文件")
+            self.receive_status_label.setStyleSheet("color: #d32f2f;")
+            return
+        else: # P2P_MODE
+            self.receive_btn.setEnabled(True)
+            self.receive_status_label.setText("等待接收文件...")
+            self.receive_status_label.setStyleSheet("color: #666;")
+
+
         file_selected = False
         if hasattr(self, 'selected_file_label') and self.selected_file_label.text() != "未选择文件" and \
            self.selected_file_label.text() is not None and \
@@ -1606,9 +1823,9 @@ class FileEncryptionApp(QMainWindow):
                     # 检查邻居是否受信任
                     if self.identity_manager.is_peer_trusted(peer_uuid):
                         peer_selected_and_ready = True
+
         
-        print(f"DEBUG: 按钮状态更新 - 文件已选: {file_selected}, 邻居已选且就绪: {peer_selected_and_ready}")
-        
+
         if hasattr(self, 'send_btn'):
             self.send_btn.setEnabled(file_selected and peer_selected_and_ready)
 
@@ -1616,7 +1833,6 @@ class FileEncryptionApp(QMainWindow):
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     ex = FileEncryptionApp()
-    ex.show() 
-    ex._post_init_setup() 
+    ex.show()
+    ex._post_init_setup()
     sys.exit(app.exec_())
-
