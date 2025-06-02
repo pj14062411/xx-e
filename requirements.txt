@@ -1,0 +1,4 @@
+PyQt5>=5.15.0
+cryptography>=3.4.0
+pycryptodome>=3.19.0
+pyinstaller>=6.3.0 

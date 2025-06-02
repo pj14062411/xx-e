@@ -1,0 +1,11 @@
+大方向上网络通信解决了，但是还需要你补充加密的实现，其他小的问题未测试，如果需要虚拟机，请明天联系我
+
+打包方法，双击build.bat，然后运行dist文件夹下的exe文件
+
+
+
+你遇到的错误 无法从PEM设置接收方公钥：type object 'RSA' has no attribute 'get_e_n_from_pem' 非常明确。这意味着你的 rsa_encryption.py 文件中定义的 RSA 类缺少一个名为 get_e_n_from_pem 的静态方法（或实例方法），而 main.py 和 network_core.py 中的代码在尝试从 PEM 格式的公钥中提取指数 e 和模数 n 时，调用了它。
+
+根本原因： 你的 RSA 类是自定义的，我之前在 main.py 和 network_core.py 中假设它有能力从 PEM 格式的公钥字符串中解析出 e 和 n，但这个功能在 rsa_encryption.py 中尚未实现。
+
+修复方案：
